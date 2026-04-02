@@ -1,0 +1,8 @@
+[package]
+name = "autodiff-nd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ndarray = "0.17.2"
+approx = "0.5.1"
