@@ -1,4 +1,4 @@
-use ndarray::ArrayD;
+use ndarray::{ArrayD, Zip};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -536,6 +536,173 @@ impl Tensor {
 
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
             Some(Rc::new(ReluBackward {
+                parent: self.clone(),
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Sigmoid Implementation ---
+
+struct SigmoidBackward {
+    parent: Tensor,
+}
+
+impl BackwardFn for SigmoidBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let x = self.parent.0.borrow().data.clone();
+
+        // calculate sigmoid
+        let s = x.mapv(|v| 1.0 / (1.0 + (-v).exp()));
+
+        // grad = grad_output * s * (1 - s)
+        let grad_input = grad_output * &s * (ArrayD::from_elem(s.raw_dim(), 1.0) - &s);
+
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn sigmoid(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+
+        // Apply max(0, v) to every element
+        let res_data = inner.data.mapv(|v| 1.0 / (1.0 + (-v).exp()));
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(SigmoidBackward {
+                parent: self.clone(),
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Tanh Implementation ---
+
+struct TanhBackward {
+    parent: Tensor,
+}
+
+impl BackwardFn for TanhBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let x = self.parent.0.borrow().data.clone();
+
+        // calculate tanh
+        let t = x.mapv(|v| v.tanh());
+
+        // grad: grad_output * (1 - t^2)
+        let grad_input = grad_output * (ArrayD::from_elem(t.raw_dim(), 1.0) - (&t * &t));
+
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn tanh(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+
+        // Apply max(0, v) to every element
+        let res_data = inner.data.mapv(|v| v.tanh());
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(TanhBackward {
+                parent: self.clone(),
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Gelu Implementation (Modern variation used in trandformers) ---
+// Gaussian Error Linear Unit
+
+struct GeluBackward {
+    parent: Tensor,
+}
+
+impl BackwardFn for GeluBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let x = self.parent.0.borrow().data.clone();
+
+        let sqrt_2_pi = (2.0 / std::f64::consts::PI).sqrt();
+
+        let mut grad_input = grad_output.clone();
+
+        Zip::from(&mut grad_input).and(&x).for_each(|g, &v| {
+            let x3 = v * v * v;
+            let inner = sqrt_2_pi * (v + 0.044715 * x3);
+            let tanh_inner = inner.tanh();
+
+            // Derivative components
+            let left = 0.5 * (1.0 + tanh_inner);
+            let right = 0.5
+                * v
+                * (1.0 - tanh_inner * tanh_inner)
+                * sqrt_2_pi
+                * (1.0 + 3.0 * 0.044715 * v * v);
+
+            *g *= left + right;
+        });
+
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn gelu(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+
+        let sqrt_2_pi = (2.0 / std::f64::consts::PI).sqrt();
+        let res_data = inner
+            .data
+            .mapv(|x| 0.5 * x * (1.0 + (sqrt_2_pi * (x + 0.044715 * x * x * x)).tanh()));
+
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(GeluBackward {
                 parent: self.clone(),
             }))
         } else {
