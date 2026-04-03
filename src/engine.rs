@@ -18,6 +18,37 @@ pub struct TensorInner {
 #[derive(Clone)]
 pub struct Tensor(pub Rc<RefCell<TensorInner>>);
 
+/* --------------------- global functions-------------------------- */
+fn reduce_grad(grad: ArrayD<f64>, target_shape: &[usize]) -> ArrayD<f64> {
+    let mut res = grad;
+
+    // Step 1: Right-align target shape (pad with 1s on the left)
+    let mut target = target_shape.to_vec();
+    while target.len() < res.ndim() {
+        target.insert(0, 1);
+    }
+
+    // Step 2: Reduce extra dimensions
+    while res.ndim() > target.len() {
+        res = res.sum_axis(ndarray::Axis(0));
+    }
+
+    // Step 3: Reduce broadcasted dimensions
+    for i in (0..target.len()).rev() {
+        if target[i] == 1 && res.shape()[i] > 1 {
+            res = res.sum_axis(ndarray::Axis(i)).insert_axis(ndarray::Axis(i));
+        }
+    }
+
+    // Step 4: Remove leading dims if original target was smaller
+    while res.ndim() > target_shape.len() {
+        res = res.sum_axis(ndarray::Axis(0));
+    }
+
+    res
+}
+
+/* ------------------------------------------------------------------- */
 pub trait BackwardFn {
     fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>>;
     fn parents(&self) -> Vec<Tensor>;
@@ -104,9 +135,15 @@ struct AddBackward {
 
 impl BackwardFn for AddBackward {
     fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
-        // Derivative of x + y is 1, so pass grad through
-        vec![grad_output.clone(), grad_output]
+        let shape0 = self.parents[0].0.borrow().data.shape().to_vec();
+        let shape1 = self.parents[1].0.borrow().data.shape().to_vec();
+
+        vec![
+            reduce_grad(grad_output.clone(), &shape0),
+            reduce_grad(grad_output, &shape1),
+        ]
     }
+
     fn parents(&self) -> Vec<Tensor> {
         self.parents.clone()
     }
@@ -146,8 +183,16 @@ impl BackwardFn for MulBackward {
     fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
         let p0 = self.parents[0].0.borrow();
         let p1 = self.parents[1].0.borrow();
-        // d(x*y)/dx = y, d(x*y)/dy = x
-        vec![&grad_output * &p1.data, &grad_output * &p0.data]
+
+        let shape0 = p0.data.shape().to_vec();
+        let shape1 = p1.data.shape().to_vec();
+
+        // d(x*y)/dx = y * grad_output
+        let g0 = reduce_grad(&grad_output * &p1.data, &shape0);
+        // d(x*y)/dy = x * grad_output
+        let g1 = reduce_grad(&grad_output * &p0.data, &shape1);
+
+        vec![g0, g1]
     }
     fn parents(&self) -> Vec<Tensor> {
         self.parents.clone()
@@ -186,8 +231,13 @@ struct SubBackward {
 
 impl BackwardFn for SubBackward {
     fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
-        let grad_y = grad_output.clone().neg();
-        vec![grad_output.clone(), grad_y]
+        let shape0 = self.parents[0].0.borrow().data.shape().to_vec();
+        let shape1 = self.parents[1].0.borrow().data.shape().to_vec();
+
+        let grad_0 = reduce_grad(grad_output.clone(), &shape0);
+        let grad_1 = reduce_grad(-grad_output, &shape1);
+
+        vec![grad_0, grad_1]
     }
     fn parents(&self) -> Vec<Tensor> {
         self.parents.clone()
@@ -704,6 +754,79 @@ impl Tensor {
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
             Some(Rc::new(GeluBackward {
                 parent: self.clone(),
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+/* ------------Matrix operations-------------- */
+
+// --- Matmul Implementation ---
+
+struct MatmulBackward {
+    parents: Vec<Tensor>,
+}
+
+impl BackwardFn for MatmulBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let a = self.parents[0].0.borrow().data.clone();
+        let b = self.parents[1].0.borrow().data.clone();
+
+        // Convert ArrayD to Array2 temporarily for 2D matrix multiplication
+        let g_out = grad_output.into_dimensionality::<ndarray::Ix2>().unwrap();
+        let a_mat = a.into_dimensionality::<ndarray::Ix2>().unwrap();
+        let b_mat = b.into_dimensionality::<ndarray::Ix2>().unwrap();
+
+        // dA = grad_output @ B^T
+
+        let grad_a = g_out.dot(&b_mat.t()).into_dyn();
+
+        // dB = A^T @ grad_output
+        let grad_b = a_mat.t().dot(&g_out).into_dyn();
+
+        vec![grad_a, grad_b]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        self.parents.clone()
+    }
+}
+
+impl Tensor {
+    pub fn matmul(&self, rhs: &Tensor) -> Self {
+        let req_grad = self.0.borrow().requires_grad || rhs.0.borrow().requires_grad;
+
+        let a_inner = self.0.borrow();
+        let b_inner = rhs.0.borrow();
+
+        // Perform matrix multiplication
+        // into_dimensionality converts ArrayD to Array2
+        let a_mat = a_inner
+            .data
+            .clone()
+            .into_dimensionality::<ndarray::Ix2>()
+            .expect("A must be 2D");
+        let b_mat = b_inner
+            .data
+            .clone()
+            .into_dimensionality::<ndarray::Ix2>()
+            .expect("B must be 2D");
+
+        let res_data = a_mat.dot(&b_mat).into_dyn();
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(MatmulBackward {
+                parents: vec![self.clone(), rhs.clone()],
             }))
         } else {
             None

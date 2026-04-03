@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod phase4_matrix_ops {
+    use crate::engine::Tensor;
+
     use super::*;
     use approx::assert_abs_diff_eq;
 
