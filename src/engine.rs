@@ -429,7 +429,7 @@ impl Tensor {
         let req_grad = inner.requires_grad;
 
         let res_data = inner.data.mapv(|v| v.exp());
-        let res_grad = ArrayD::zeros(vec![1]);
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
 
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
             Some(Rc::new(ExpBackward {
@@ -839,4 +839,40 @@ impl Tensor {
             grad_fn,
         })))
     }
+}
+
+/* ------------------- Loss Functions ------------------ */
+
+pub fn mse_loss(pred: &Tensor, target: &Tensor) -> Tensor {
+    // MSE = 1/n sum<i=1;n> (predi - targeti)^2
+    let diff = pred.clone() - target.clone();
+    let squared = diff.pow(2.0);
+    squared.mean()
+}
+
+pub fn cross_entropy_loss(logits: &Tensor, targets: &Vec<usize>) -> Tensor {
+    let exp = logits.exp();
+    let sum_exp = exp.sum(); // scalar
+    let log_sum_exp = sum_exp.ln();
+
+    let mut mask_vec = vec![0.0; logits.data().len()];
+    mask_vec[targets[0]] = 1.0;
+
+    let mask = Tensor::new(mask_vec, logits.data().shape());
+    let correct_logit = (logits.clone() * mask).sum();
+
+    log_sum_exp - correct_logit
+}
+
+pub fn binary_cross_entropy(pred: &Tensor, target: &Tensor) -> Tensor {
+    let one = Tensor::new(vec![1.0], pred.data().shape());
+
+    //y * ln(p)
+    let term1 = target.clone() * pred.ln();
+
+    // (1 - y) * ln(1 - p)
+
+    let term2 = (one.clone() - target.clone()) * (one - pred.clone()).ln();
+
+    -(term1 + term2).mean()
 }
