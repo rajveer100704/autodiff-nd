@@ -2,7 +2,7 @@
 mod phase2_ops {
     use std::ops::Neg;
 
-    use crate::engine::Tensor;
+    use autodiff_nd::engine::Tensor;
 
     use super::*;
     use approx::assert_abs_diff_eq;

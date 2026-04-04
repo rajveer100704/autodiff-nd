@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod phase5_losses {
-    use crate::engine::{Tensor, binary_cross_entropy, cross_entropy_loss, mse_loss};
+    use autodiff_nd::engine::{Tensor, binary_cross_entropy, cross_entropy_loss, mse_loss};
 
     use super::*;
     use approx::assert_abs_diff_eq;

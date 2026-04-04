@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod phase1_autograd_basics {
-    use crate::engine::Tensor;
     use approx::assert_abs_diff_eq;
+    use autodiff_nd::engine::Tensor;
 
     #[test]
     fn test_add_forward() {
