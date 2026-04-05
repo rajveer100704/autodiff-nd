@@ -1,4 +1,5 @@
 use ndarray::{ArrayD, Zip};
+use ndarray_rand::{RandomExt, rand_distr::Bernoulli};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -58,6 +59,17 @@ impl Tensor {
     pub fn new(data_vec: Vec<f64>, shape: &[usize]) -> Self {
         let data = ArrayD::from_shape_vec(shape, data_vec).expect("Shape mismatch");
         let grad = ArrayD::zeros(shape);
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data,
+            grad,
+            requires_grad: false,
+            grad_fn: None,
+        })))
+    }
+
+    pub fn from_array(data: ArrayD<f64>) -> Self {
+        let grad = ArrayD::zeros(data.raw_dim());
 
         Tensor(Rc::new(RefCell::new(TensorInner {
             data,
@@ -254,6 +266,114 @@ impl Sub for Tensor {
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
             Some(Rc::new(SubBackward {
                 parents: vec![self, rhs],
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Div Implementation ---
+
+struct DivBackward {
+    parents: Vec<Tensor>,
+}
+
+impl BackwardFn for DivBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let p0 = self.parents[0].0.borrow(); // x
+        let p1 = self.parents[1].0.borrow(); // y
+
+        let shape0 = p0.data.shape().to_vec();
+        let shape1 = p1.data.shape().to_vec();
+
+        // dx = grad_output * (1 / y)
+        let g0 = reduce_grad(&grad_output / &p1.data, &shape0);
+
+        // dy = grad_output * (-x / y^2)
+        let g1 = reduce_grad(
+            -(&grad_output * &p0.data) / p1.data.mapv(|v| v.powi(2)),
+            &shape1,
+        );
+
+        vec![g0, g1]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        self.parents.clone()
+    }
+}
+
+use std::ops::Div;
+
+impl Div for Tensor {
+    type Output = Tensor;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        let req_grad = self.0.borrow().requires_grad || rhs.0.borrow().requires_grad;
+
+        let res_data = &self.0.borrow().data / &rhs.0.borrow().data;
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(DivBackward {
+                parents: vec![self, rhs],
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Sqrt Implementation ---
+
+struct SqrtBackward {
+    parent: Tensor,
+}
+
+impl BackwardFn for SqrtBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let x = self.parent.0.borrow().data.clone();
+
+        // sqrt(x)
+        let sqrt_x = x.mapv(|v| v.sqrt());
+
+        // grad = grad_output * (1 / (2 * sqrt(x)))
+        let grad_input = grad_output / (sqrt_x * 2.0);
+
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn sqrt(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+
+        let res_data = inner.data.mapv(|v| v.sqrt());
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(SqrtBackward {
+                parent: self.clone(),
             }))
         } else {
             None
@@ -875,4 +995,76 @@ pub fn binary_cross_entropy(pred: &Tensor, target: &Tensor) -> Tensor {
     let term2 = (one.clone() - target.clone()) * (one - pred.clone()).ln();
 
     -(term1 + term2).mean()
+}
+
+// --- Dropout Implementation ---
+
+struct DropoutBackward {
+    parent: Tensor,
+    mask: ArrayD<f64>,
+    scale: f64,
+}
+
+impl BackwardFn for DropoutBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        // Gradient only flows through the elements that weren't dropped
+        // derivative = mask * scale
+        let grad_input = grad_output * &self.mask * self.scale;
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+pub struct Dropout {
+    pub p: f64, // Probability of dropping an element
+}
+
+impl Dropout {
+    pub fn new(p: f64) -> Self {
+        assert!(p >= 0.0 && p < 1.0, "Dropout probability must be in [0, 1)");
+        Self { p }
+    }
+
+    pub fn forward(&self, x: &Tensor, training: bool) -> Tensor {
+        if !training {
+            return x.clone();
+        }
+
+        let inner = x.0.borrow();
+        let shape = inner.data.raw_dim();
+
+        // 1. Create a mask where 'keep' probability is (1 - p)
+        // We use (1.0 - p) because Bernoulli(p) usually returns 1 with prob p.
+        // We want to keep with prob (1-p).
+        let keep_prob = 1.0 - self.p;
+        let scale = 1.0 / keep_prob;
+
+        let mask = ArrayD::random(shape, Bernoulli::new(keep_prob).unwrap())
+            .mapv(|b| if b { 1.0 } else { 0.0 });
+
+        // 2. Apply mask and scale (Inverted Dropout)
+        let res_data = (&inner.data * &mask) * scale;
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+        let req_grad = inner.requires_grad;
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(DropoutBackward {
+                parent: x.clone(),
+                mask,
+                scale,
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
 }

@@ -1,3 +1,4 @@
+pub mod batchnorm;
 pub mod engine;
 pub mod linear;
 pub mod module;
