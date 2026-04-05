@@ -51,7 +51,7 @@ mod phase7_training {
         let x = Tensor::new(vec![1.0; 10], &[1, 10]);
         let t = Tensor::new(vec![10.0; 10], &[1, 10]); // large residual → large grads
         mse_loss(&layer.forward(&x), &t).backward();
-        clip_grad_norm(layer.parameters(), 1.0);
+        clip_grad_norm(&layer.parameters(), 1.0);
         let total_norm: f64 = layer
             .parameters()
             .iter()

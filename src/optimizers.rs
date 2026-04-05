@@ -133,23 +133,18 @@ impl Optimizer for Adam {
 }
 
 /*-------------------------------END ADAM------------------------------------ */
-
-pub fn clip_grad_norm(params: Vec<Tensor>, max_norm: f64) {
-    // 1. Calculate total L2 norm
-    let mut total_norm = 0.0;
-    for p in &params {
+pub fn clip_grad_norm(params: &[Tensor], max_norm: f64) {
+    let mut total_norm = 0.0_f64;
+    for p in params {
         let inner = p.0.borrow();
-        // Sum of squares of all elements in this tensor's gradient
         total_norm += inner.grad.iter().map(|&x| x * x).sum::<f64>();
     }
     total_norm = total_norm.sqrt();
 
-    // 2. If norm exceeds max, scale everything down
     if total_norm > max_norm {
-        let clip_coeff = max_norm / (total_norm + 1e-6); // 1e-6 for numerical stability
-        for p in &params {
-            let mut inner = p.0.borrow_mut();
-            inner.grad.mapv_inplace(|x| x * clip_coeff);
+        let clip_coeff = max_norm / (total_norm + 1e-6);
+        for p in params {
+            p.0.borrow_mut().grad.mapv_inplace(|x| x * clip_coeff);
         }
     }
 }

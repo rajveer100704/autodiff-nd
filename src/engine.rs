@@ -1,4 +1,4 @@
-use ndarray::{ArrayD, Zip};
+use ndarray::{Array2, ArrayD, Zip};
 use ndarray_rand::{RandomExt, rand_distr::Bernoulli};
 use std::{
     cell::RefCell,
@@ -298,8 +298,10 @@ impl BackwardFn for DivBackward {
         let g0 = reduce_grad(&grad_output / &p1.data, &shape0);
 
         // dy = grad_output * (-x / y^2)
+        let eps = 1e-12;
+
         let g1 = reduce_grad(
-            -(&grad_output * &p0.data) / p1.data.mapv(|v| v.powi(2)),
+            -(&grad_output * &p0.data) / p1.data.mapv(|v| v * v + eps),
             &shape1,
         );
 
@@ -353,7 +355,8 @@ impl BackwardFn for SqrtBackward {
         let sqrt_x = x.mapv(|v| v.sqrt());
 
         // grad = grad_output * (1 / (2 * sqrt(x)))
-        let grad_input = grad_output / (sqrt_x * 2.0);
+        let eps = 1e-12;
+        let grad_input = grad_output / ((sqrt_x + eps) * 2.0);
 
         vec![grad_input]
     }
@@ -649,7 +652,8 @@ impl Tensor {
         let req_grad = inner.requires_grad;
 
         // Compute ln(v) for every element v in data
-        let res_data = inner.data.mapv(|v| v.ln());
+        let eps = 1e-12;
+        let res_data = inner.data.mapv(|v| (v.max(eps)).ln());
         let res_grad = ArrayD::zeros(res_data.raw_dim());
 
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
@@ -890,7 +894,11 @@ impl Tensor {
 
 /* ------------Matrix operations-------------- */
 
-// --- Matmul Implementation ---
+// --- Matmul Implementation (2D and batched 3D)---
+
+fn matmul_2d(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    a.dot(b)
+}
 
 struct MatmulBackward {
     parents: Vec<Tensor>,
@@ -901,19 +909,69 @@ impl BackwardFn for MatmulBackward {
         let a = self.parents[0].0.borrow().data.clone();
         let b = self.parents[1].0.borrow().data.clone();
 
-        // Convert ArrayD to Array2 temporarily for 2D matrix multiplication
-        let g_out = grad_output.into_dimensionality::<ndarray::Ix2>().unwrap();
-        let a_mat = a.into_dimensionality::<ndarray::Ix2>().unwrap();
-        let b_mat = b.into_dimensionality::<ndarray::Ix2>().unwrap();
+        let ndim = grad_output.ndim();
 
-        // dA = grad_output @ B^T
+        if ndim == 2 {
+            // Standard 2D: dA = G @ B^T,  dB = A^T @ G
+            let g = grad_output.into_dimensionality::<ndarray::Ix2>().unwrap();
+            let a2 = a.into_dimensionality::<ndarray::Ix2>().unwrap();
+            let b2 = b.into_dimensionality::<ndarray::Ix2>().unwrap();
 
-        let grad_a = g_out.dot(&b_mat.t()).into_dyn();
+            let grad_a = g.dot(&b2.t()).into_dyn();
+            let grad_b = a2.t().dot(&g).into_dyn();
+            vec![grad_a, grad_b]
+        } else if ndim == 3 {
+            // Batched 3D: (batch, M, K) @ (K, N) or (batch, K, N)
+            let g3 = grad_output.into_dimensionality::<ndarray::Ix3>().unwrap();
+            let batch = g3.shape()[0];
 
-        // dB = A^T @ grad_output
-        let grad_b = a_mat.t().dot(&g_out).into_dyn();
+            let b_is_2d = b.ndim() == 2;
 
-        vec![grad_a, grad_b]
+            let mut grad_a_out = ndarray::Array3::<f64>::zeros((batch, a.shape()[1], a.shape()[2]));
+            let mut grad_b_out = ArrayD::zeros(b.raw_dim());
+
+            for i in 0..batch {
+                let gi = g3.index_axis(ndarray::Axis(0), i); // (M, N)
+                let ai = a
+                    .index_axis(ndarray::Axis(0), i)
+                    .into_dimensionality::<ndarray::Ix2>()
+                    .unwrap(); // (M, K)
+
+                if b_is_2d {
+                    let b2 = b.view().into_dimensionality::<ndarray::Ix2>().unwrap();
+                    // dA[i] = G[i] @ B^T
+                    grad_a_out
+                        .index_axis_mut(ndarray::Axis(0), i)
+                        .assign(&gi.dot(&b2.t()));
+                    // dB += A[i]^T @ G[i]
+                    let db = ai
+                        .t()
+                        .dot(&gi.into_dimensionality::<ndarray::Ix2>().unwrap());
+                    grad_b_out += &db.into_dyn();
+                } else {
+                    let bi = b
+                        .index_axis(ndarray::Axis(0), i)
+                        .into_dimensionality::<ndarray::Ix2>()
+                        .unwrap(); // (K, N)
+                    let gi2 = gi.into_dimensionality::<ndarray::Ix2>().unwrap();
+
+                    grad_a_out
+                        .index_axis_mut(ndarray::Axis(0), i)
+                        .assign(&gi2.dot(&bi.t()));
+
+                    let mut gb3 = grad_b_out
+                        .view_mut()
+                        .into_dimensionality::<ndarray::Ix3>()
+                        .unwrap();
+                    gb3.index_axis_mut(ndarray::Axis(0), i)
+                        .assign(&ai.t().dot(&gi2));
+                }
+            }
+
+            vec![grad_a_out.into_dyn(), grad_b_out]
+        } else {
+            panic!("matmul only supports 2D and 3D tensors, got {}D", ndim);
+        }
     }
 
     fn parents(&self) -> Vec<Tensor> {
@@ -925,28 +983,138 @@ impl Tensor {
     pub fn matmul(&self, rhs: &Tensor) -> Self {
         let req_grad = self.0.borrow().requires_grad || rhs.0.borrow().requires_grad;
 
-        let a_inner = self.0.borrow();
-        let b_inner = rhs.0.borrow();
+        let a = self.0.borrow().data.clone();
+        let b = rhs.0.borrow().data.clone();
 
-        // Perform matrix multiplication
-        // into_dimensionality converts ArrayD to Array2
-        let a_mat = a_inner
-            .data
-            .clone()
-            .into_dimensionality::<ndarray::Ix2>()
-            .expect("A must be 2D");
-        let b_mat = b_inner
-            .data
-            .clone()
-            .into_dimensionality::<ndarray::Ix2>()
-            .expect("B must be 2D");
+        let res_data = match (a.ndim(), b.ndim()) {
+            (2, 2) => {
+                let a2 = a.into_dimensionality::<ndarray::Ix2>().unwrap();
+                let b2 = b.into_dimensionality::<ndarray::Ix2>().unwrap();
+                a2.dot(&b2).into_dyn()
+            }
+            (3, 2) => {
+                // (batch, M, K) @ (K, N) → (batch, M, N)
+                let a3 = a.into_dimensionality::<ndarray::Ix3>().unwrap();
+                let b2 = b.into_dimensionality::<ndarray::Ix2>().unwrap();
+                let batch = a3.shape()[0];
+                let m = a3.shape()[1];
+                let n = b2.shape()[1];
+                let mut out = ndarray::Array3::<f64>::zeros((batch, m, n));
+                for i in 0..batch {
+                    let ai = a3.index_axis(ndarray::Axis(0), i);
+                    let ai2 = ai.into_dimensionality::<ndarray::Ix2>().unwrap();
+                    out.index_axis_mut(ndarray::Axis(0), i)
+                        .assign(&ai2.dot(&b2));
+                }
+                out.into_dyn()
+            }
+            (3, 3) => {
+                // (batch, M, K) @ (batch, K, N) → (batch, M, N)
+                let a3 = a.into_dimensionality::<ndarray::Ix3>().unwrap();
+                let b3 = b.into_dimensionality::<ndarray::Ix3>().unwrap();
+                let batch = a3.shape()[0];
+                let m = a3.shape()[1];
+                let n = b3.shape()[2];
+                let mut out = ndarray::Array3::<f64>::zeros((batch, m, n));
+                for i in 0..batch {
+                    let ai = a3
+                        .index_axis(ndarray::Axis(0), i)
+                        .into_dimensionality::<ndarray::Ix2>()
+                        .unwrap();
+                    let bi = b3
+                        .index_axis(ndarray::Axis(0), i)
+                        .into_dimensionality::<ndarray::Ix2>()
+                        .unwrap();
+                    out.index_axis_mut(ndarray::Axis(0), i).assign(&ai.dot(&bi));
+                }
+                out.into_dyn()
+            }
+            (a_ndim, b_ndim) => panic!("matmul: unsupported shapes {}D @ {}D", a_ndim, b_ndim),
+        };
 
-        let res_data = a_mat.dot(&b_mat).into_dyn();
         let res_grad = ArrayD::zeros(res_data.raw_dim());
 
         let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
             Some(Rc::new(MatmulBackward {
                 parents: vec![self.clone(), rhs.clone()],
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Transpose Implementation ---
+
+struct TransposeBackward {
+    parent: Tensor,
+}
+
+impl BackwardFn for TransposeBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        // Transpose the gradient back
+        let ndim = grad_output.ndim();
+        let transposed = if ndim == 2 {
+            let g2 = grad_output.into_dimensionality::<ndarray::Ix2>().unwrap();
+            g2.t().to_owned().into_dyn()
+        } else if ndim == 3 {
+            // Swap last two axes: (batch, N, M) → (batch, M, N)
+            grad_output
+                .permuted_axes(ndarray::IxDyn(&[0, 2, 1]))
+                .as_standard_layout()
+                .to_owned()
+                .into_dyn()
+        } else {
+            panic!("transpose only supports 2D and 3D tensors");
+        };
+        vec![transposed]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    /// Transposes the last two dimensions.
+    /// 2D: (M, N) → (N, M)
+    /// 3D: (batch, M, N) → (batch, N, M)
+    pub fn transpose(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+        let ndim = inner.data.ndim();
+
+        let res_data = if ndim == 2 {
+            let d2 = inner
+                .data
+                .clone()
+                .into_dimensionality::<ndarray::Ix2>()
+                .unwrap();
+            d2.t().to_owned().into_dyn()
+        } else if ndim == 3 {
+            inner
+                .data
+                .clone()
+                .permuted_axes(ndarray::IxDyn(&[0, 2, 1]))
+                .as_standard_layout()
+                .to_owned()
+                .into_dyn()
+        } else {
+            panic!("transpose only supports 2D and 3D tensors");
+        };
+
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(TransposeBackward {
+                parent: self.clone(),
             }))
         } else {
             None
@@ -970,28 +1138,48 @@ pub fn mse_loss(pred: &Tensor, target: &Tensor) -> Tensor {
     squared.mean()
 }
 
-pub fn cross_entropy_loss(logits: &Tensor, targets: &Vec<usize>) -> Tensor {
-    let exp = logits.exp();
-    let sum_exp = exp.sum(); // scalar
-    let log_sum_exp = sum_exp.ln();
+pub fn cross_entropy_loss(logits: &Tensor, targets: &[usize]) -> Tensor {
+    let batch = targets.len();
+    let num_classes = logits.data().shape()[1];
 
-    let mut mask_vec = vec![0.0; logits.data().len()];
-    mask_vec[targets[0]] = 1.0;
+    // log_softmax = ln(softmax(logits))
+    let log_probs = logits.softmax().ln();
 
-    let mask = Tensor::new(mask_vec, logits.data().shape());
-    let correct_logit = (logits.clone() * mask).sum();
+    let mut losses = Vec::new();
 
-    log_sum_exp - correct_logit
+    for (i, &class) in targets.iter().enumerate() {
+        // Build one-hot mask
+        let mut mask = vec![0.0; num_classes];
+        mask[class] = 1.0;
+
+        let mask_t = Tensor::new(mask, &[num_classes]);
+
+        // Extract row i (we still need slicing workaround)
+        let row = logits.slice_row(i);
+
+        let log_row = row.softmax().ln();
+        let correct_log_prob = (log_row * mask_t).sum();
+
+        losses.push(-correct_log_prob);
+    }
+
+    let mut total = losses[0].clone();
+    for l in losses.iter().skip(1) {
+        total = total + l.clone();
+    }
+
+    let n = Tensor::new(vec![batch as f64], &[1]);
+    total / n
 }
 
 pub fn binary_cross_entropy(pred: &Tensor, target: &Tensor) -> Tensor {
-    let one = Tensor::new(vec![1.0], pred.data().shape());
+    // Use ones_like instead of hardcoded vec![1.0]
+    let one = Tensor::from_array(ArrayD::ones(pred.data().raw_dim()));
 
-    //y * ln(p)
+    // y * ln(p)
     let term1 = target.clone() * pred.ln();
 
     // (1 - y) * ln(1 - p)
-
     let term2 = (one.clone() - target.clone()) * (one - pred.clone()).ln();
 
     -(term1 + term2).mean()
@@ -1060,6 +1248,247 @@ impl Dropout {
             None
         };
 
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+// --- Softmax Implementation (numerically stable, along last axis) ---
+
+struct SoftmaxBackward {
+    input: Tensor, // store input only — avoids Rc cycle
+}
+
+impl BackwardFn for SoftmaxBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        // Recompute softmax(input) from scratch — cheap and cycle-free
+        let x = self.input.0.borrow().data.clone();
+        let ndim = x.ndim();
+
+        // Numerically stable: subtract max before exp
+        let max = x
+            .map_axis(ndarray::Axis(ndim - 1), |row| {
+                row.fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            })
+            .insert_axis(ndarray::Axis(ndim - 1));
+
+        let exp = (&x - &max).mapv(|v| v.exp());
+        let sum = exp
+            .sum_axis(ndarray::Axis(ndim - 1))
+            .insert_axis(ndarray::Axis(ndim - 1));
+
+        let s = exp / sum; // softmax(x) — shape matches input
+
+        // Jacobian-vector product for softmax:
+        // dL/dx_i = s_i * (dL/ds_i - sum_j(dL/ds_j * s_j))
+        let dot = (&grad_output * &s)
+            .sum_axis(ndarray::Axis(ndim - 1))
+            .insert_axis(ndarray::Axis(ndim - 1));
+
+        let grad_input = &s * (&grad_output - &dot);
+
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.input.clone()]
+    }
+}
+
+impl Tensor {
+    /// Numerically stable softmax along the last axis.
+    /// Works for 1D, 2D (batch, classes), and 3D (batch, seq, features).
+    pub fn softmax(&self) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+        let ndim = inner.data.ndim();
+
+        // Subtract max for numerical stability
+        let max = inner
+            .data
+            .map_axis(ndarray::Axis(ndim - 1), |row| {
+                row.fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            })
+            .insert_axis(ndarray::Axis(ndim - 1));
+
+        let shifted = &inner.data - &max;
+        let exp = shifted.mapv(|v| v.exp());
+        let sum = exp
+            .sum_axis(ndarray::Axis(ndim - 1))
+            .insert_axis(ndarray::Axis(ndim - 1));
+
+        let res_data = exp / sum;
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        // grad_fn points to self (the input), not the output — no cycle
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(SoftmaxBackward {
+                input: self.clone(),
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+// --- sum_axis: reduce along a specific axis, keepdims=true ---
+
+struct SumAxisBackward {
+    parent: Tensor,
+    axis: usize,
+    input_shape: Vec<usize>,
+}
+
+impl BackwardFn for SumAxisBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        // grad_output has the reduced shape (with the axis kept as size 1).
+        // Broadcast it back to the full input shape.
+        let mut grad = grad_output;
+        // If keepdim collapsed it, re-insert the axis
+        if grad.ndim() < self.input_shape.len() {
+            grad = grad.insert_axis(ndarray::Axis(self.axis));
+        }
+        // Broadcast to input shape
+        let grad_input = grad.broadcast(self.input_shape.clone()).unwrap().to_owned();
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    /// Sum along a single axis, keeping the dimension (keepdims=true).
+    pub fn sum_axis(&self, axis: usize) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+        let input_shape = inner.data.shape().to_vec();
+
+        let reduced = inner
+            .data
+            .sum_axis(ndarray::Axis(axis))
+            .insert_axis(ndarray::Axis(axis));
+
+        let res_grad = ArrayD::zeros(reduced.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(SumAxisBackward {
+                parent: self.clone(),
+                axis,
+                input_shape,
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: reduced,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+// --- Reshape Implementation ---
+
+struct ReshapeBackward {
+    parent: Tensor,
+    input_shape: Vec<usize>,
+}
+
+impl BackwardFn for ReshapeBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        // Reshape the gradient back to the original input shape
+        let grad_input = grad_output
+            .into_shape_with_order(self.input_shape.clone())
+            .unwrap();
+        vec![grad_input]
+    }
+
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn reshape(&self, new_shape: &[usize]) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+        let input_shape = inner.data.shape().to_vec();
+
+        let res_data = inner
+            .data
+            .clone()
+            .into_shape_with_order(new_shape)
+            .expect("reshape: total number of elements must match");
+
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(ReshapeBackward {
+                parent: self.clone(),
+                input_shape,
+            }))
+        } else {
+            None
+        };
+
+        Tensor(Rc::new(RefCell::new(TensorInner {
+            data: res_data,
+            grad: res_grad,
+            requires_grad: req_grad,
+            grad_fn,
+        })))
+    }
+}
+
+struct SliceRowBackward {
+    parent: Tensor,
+    row_idx: usize,
+}
+
+impl BackwardFn for SliceRowBackward {
+    fn backward(&self, grad_output: ArrayD<f64>) -> Vec<ArrayD<f64>> {
+        let parent_shape = self.parent.0.borrow().data.shape().to_vec();
+        let mut grad = ArrayD::zeros(parent_shape);
+        grad.index_axis_mut(ndarray::Axis(0), self.row_idx)
+            .assign(&grad_output);
+        vec![grad]
+    }
+    fn parents(&self) -> Vec<Tensor> {
+        vec![self.parent.clone()]
+    }
+}
+
+impl Tensor {
+    pub fn slice_row(&self, i: usize) -> Self {
+        let inner = self.0.borrow();
+        let req_grad = inner.requires_grad;
+        let res_data = inner
+            .data
+            .index_axis(ndarray::Axis(0), i)
+            .to_owned()
+            .into_dyn();
+        let res_grad = ArrayD::zeros(res_data.raw_dim());
+        let grad_fn: Option<Rc<dyn BackwardFn>> = if req_grad {
+            Some(Rc::new(SliceRowBackward {
+                parent: self.clone(),
+                row_idx: i,
+            }))
+        } else {
+            None
+        };
         Tensor(Rc::new(RefCell::new(TensorInner {
             data: res_data,
             grad: res_grad,
