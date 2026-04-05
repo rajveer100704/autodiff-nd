@@ -5,8 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/autodiff-nd"><img src="https://img.shields.io/crates/v/autodiff-nd.svg" alt="Crates.io"></a>
-  <a href="https://docs.rs/autodiff-nd"><img src="https://docs.rs/autodiff-nd/badge.svg" alt="docs.rs"></a>
   <img src="https://img.shields.io/badge/rust-2021_edition-orange.svg" alt="Rust 2021">
   <img src="https://img.shields.io/badge/status-experimental-yellow.svg" alt="Experimental">
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License">
