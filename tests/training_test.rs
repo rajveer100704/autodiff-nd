@@ -3,7 +3,7 @@ mod phase7_training {
     use super::*;
     use autodiff_nd::batchnorm::BatchNorm1d;
     use autodiff_nd::engine::{Dropout, Tensor, binary_cross_entropy, mse_loss};
-    use autodiff_nd::linear::Liner;
+    use autodiff_nd::linear::Linear;
     use autodiff_nd::module::Module;
     use autodiff_nd::optimizers::{Adam, Optimizer, SGD, clip_grad_norm, l2_regularization};
 
@@ -14,8 +14,8 @@ mod phase7_training {
         let xs: Vec<[f64; 2]> = vec![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let ys: Vec<f64> = vec![0.0, 1.0, 1.0, 0.0];
 
-        let l1 = Liner::new(2, 4);
-        let l2 = Liner::new(4, 1);
+        let l1 = Linear::new(2, 4);
+        let l2 = Linear::new(4, 1);
 
         let params: Vec<Tensor> = l1.parameters().into_iter().chain(l2.parameters()).collect();
         let mut opt = Adam::new(params, 0.01, 0.9, 0.999, 1e-8);
@@ -47,7 +47,7 @@ mod phase7_training {
     /// Gradient clipping prevents exploding gradients in deep nets.
     #[test]
     fn test_gradient_clipping() {
-        let layer = Liner::new(10, 10);
+        let layer = Linear::new(10, 10);
         let x = Tensor::new(vec![1.0; 10], &[1, 10]);
         let t = Tensor::new(vec![10.0; 10], &[1, 10]); // large residual → large grads
         mse_loss(&layer.forward(&x), &t).backward();
@@ -64,7 +64,7 @@ mod phase7_training {
     /// L2 regularization (weight decay) should increase loss on over-fit weights.
     #[test]
     fn test_weight_decay_penalizes_large_weights() {
-        let layer = Liner::new(2, 1);
+        let layer = Linear::new(2, 1);
         // Manually set large weights
         layer.weight.0.borrow_mut().data.fill(100.0);
         let x = Tensor::new(vec![1.0, 1.0], &[1, 2]);

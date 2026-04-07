@@ -1497,3 +1497,23 @@ impl Tensor {
         })))
     }
 }
+
+/* -----------Activation enum-------- */
+#[derive(Clone)]
+pub enum Activation {
+    Relu,
+    Sigmoid,
+    Tanh,
+    Gelu,
+}
+
+impl Activation {
+    pub fn apply(&self, x: &Tensor) -> Tensor {
+        match self {
+            Activation::Relu => x.relu(),
+            Activation::Sigmoid => x.sigmoid(),
+            Activation::Tanh => x.tanh(),
+            Activation::Gelu => x.gelu(),
+        }
+    }
+}

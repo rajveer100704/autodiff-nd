@@ -3,12 +3,12 @@ use rand_distr::{Distribution, Normal};
 
 use crate::{engine::Tensor, module::Module};
 
-pub struct Liner {
+pub struct Linear {
     pub weight: Tensor,
     pub bias: Tensor,
 }
 
-impl Liner {
+impl Linear {
     pub fn new(in_features: usize, out_features: usize) -> Self {
         let mut rng = rng();
         // Kaiming/He Initialization: Normal(0, sqrt(2/fan_in))
@@ -27,11 +27,11 @@ impl Liner {
         let bias_data = vec![0.0; out_features];
         let bias = Tensor::new(bias_data, &[out_features]);
         bias.set_requires_grad(true);
-        Liner { weight, bias }
+        Linear { weight, bias }
     }
 }
 
-impl Module for Liner {
+impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
         x.matmul(&self.weight) + self.bias.clone()
     }

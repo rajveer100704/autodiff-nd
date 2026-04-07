@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod phase6_linear_optimizer {
     use autodiff_nd::engine::{Tensor, mse_loss};
-    use autodiff_nd::linear::Liner;
+    use autodiff_nd::linear::Linear;
     use autodiff_nd::module::Module;
     use autodiff_nd::optimizers::{Adam, Optimizer, SGD};
 
@@ -10,7 +10,7 @@ mod phase6_linear_optimizer {
 
     #[test]
     fn test_linear_layer_output_shape() {
-        let layer = Liner::new(4, 8); // in=4, out=8
+        let layer = Linear::new(4, 8); // in=4, out=8
         let x = Tensor::new(vec![1.0; 8], &[2, 4]); // batch=2
         let y = layer.forward(&x);
         assert_eq!(y.data().shape(), &[2, 8]);
@@ -19,7 +19,7 @@ mod phase6_linear_optimizer {
     #[test]
     fn test_sgd_reduces_loss() {
         // y = W*x + b;  fit a single scalar target
-        let layer = Liner::new(1, 1);
+        let layer = Linear::new(1, 1);
         let x = Tensor::new(vec![1.0], &[1, 1]);
         let target = Tensor::new(vec![5.0], &[1, 1]);
         let mut opt = SGD::new(layer.parameters(), 0.1);
@@ -38,7 +38,7 @@ mod phase6_linear_optimizer {
     #[test]
     fn test_adam_reduces_loss() {
         // Simple regression: y = 2x + 1
-        let layer = Liner::new(1, 1);
+        let layer = Linear::new(1, 1);
 
         let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[4, 1]);
         let target = Tensor::new(vec![3.0, 5.0, 7.0, 9.0], &[4, 1]);
@@ -79,7 +79,7 @@ mod phase6_linear_optimizer {
 
     #[test]
     fn test_zero_grad_clears_grad() {
-        let layer = Liner::new(2, 2);
+        let layer = Linear::new(2, 2);
         let x = Tensor::new(vec![1.0, 1.0], &[1, 2]);
         let mut opt = SGD::new(layer.parameters(), 0.1);
 
