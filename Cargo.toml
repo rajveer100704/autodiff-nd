@@ -1,11 +1,28 @@
 [package]
 name = "autodiff-nd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-ndarray = "0.17.2"
+ndarray = { version = "0.17.2", features = ["serde"] }
 ndarray-rand = "0.16.0"
 approx = "0.5.1"
 rand = "0.10.0"
 rand_distr = "0.6.0"
+# Phase 1: parallel batch loops in matmul
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "matmul_bench"
+harness = false
+path = "benches/matmul_bench.rs"
+
+[[bench]]
+name = "training_bench"
+harness = false
+path = "benches/training_bench.rs"

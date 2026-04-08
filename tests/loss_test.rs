@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod phase5_losses {
-    use autodiff_nd::engine::{Tensor, binary_cross_entropy, cross_entropy_loss, mse_loss};
+    use autodiff_nd::{Tensor, binary_cross_entropy, cross_entropy_loss, mse_loss};
 
-    use super::*;
+    
     use approx::assert_abs_diff_eq;
 
     #[test]
@@ -27,7 +27,7 @@ mod phase5_losses {
 
     #[test]
     fn test_cross_entropy_loss_range() {
-        let logits = Tensor::new(vec![1.0, 2.0, 3.0], &[3]);
+        let logits = Tensor::new(vec![1.0, 2.0, 3.0], &[1, 3]);
         let targets = vec![2usize]; // class index 2 is correct
         let loss = cross_entropy_loss(&logits, &targets);
         // loss must be positive

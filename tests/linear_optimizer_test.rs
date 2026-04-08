@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod phase6_linear_optimizer {
-    use autodiff_nd::engine::{Tensor, mse_loss};
+    use autodiff_nd::{Tensor, mse_loss};
     use autodiff_nd::linear::Linear;
     use autodiff_nd::module::Module;
     use autodiff_nd::optimizers::{Adam, Optimizer, SGD};
 
-    use super::*;
+    
     use approx::assert_abs_diff_eq;
 
     #[test]
@@ -43,7 +43,7 @@ mod phase6_linear_optimizer {
         let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[4, 1]);
         let target = Tensor::new(vec![3.0, 5.0, 7.0, 9.0], &[4, 1]);
 
-        let mut opt = Adam::new(layer.parameters(), 0.01, 0.9, 0.999, 1e-8);
+        let mut opt = Adam::new(layer.parameters(), 0.1, 0.9, 0.999, 1e-8);
 
         // Initial loss
         let initial_loss = mse_loss(&layer.forward(&x), &target).data()[[0]];

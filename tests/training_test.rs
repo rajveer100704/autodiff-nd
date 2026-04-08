@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod phase7_training {
-    use super::*;
+    
     use autodiff_nd::batchnorm::BatchNorm1d;
-    use autodiff_nd::engine::{Dropout, Tensor, binary_cross_entropy, mse_loss};
+    use autodiff_nd::{Tensor, Dropout};
+    use autodiff_nd::{binary_cross_entropy, mse_loss};
     use autodiff_nd::linear::Linear;
     use autodiff_nd::module::Module;
-    use autodiff_nd::optimizers::{Adam, Optimizer, SGD, clip_grad_norm, l2_regularization};
+    use autodiff_nd::optimizers::{Adam, Optimizer, clip_grad_norm, l2_regularization};
 
     /// XOR is the canonical non-linearly-separable toy problem.
     /// A 2→4→1 MLP with sigmoid should solve it.
@@ -66,7 +67,7 @@ mod phase7_training {
     fn test_weight_decay_penalizes_large_weights() {
         let layer = Linear::new(2, 1);
         // Manually set large weights
-        layer.weight.0.borrow_mut().data.fill(100.0);
+        layer.weight.inner().data.write().unwrap().fill(100.0);
         let x = Tensor::new(vec![1.0, 1.0], &[1, 2]);
         let tgt = Tensor::new(vec![0.0], &[1, 1]);
         let loss_no_reg = mse_loss(&layer.forward(&x), &tgt).data()[[0]];
@@ -97,7 +98,7 @@ mod phase7_training {
     fn test_dropout_zero_fraction() {
         let dropout = Dropout::new(0.5);
         let x = Tensor::new(vec![1.0; 1000], &[1000]);
-        let out = dropout.forward(&x, true);
+        let out = dropout.forward(&x);
         let zero_count = out.data().iter().filter(|&&v| v == 0.0).count();
         // Should be roughly 500 ± 60 zeros
         assert!(

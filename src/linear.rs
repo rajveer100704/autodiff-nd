@@ -39,4 +39,11 @@ impl Module for Linear {
     fn parameters(&self) -> Vec<Tensor> {
         vec![self.weight.clone(), self.bias.clone()]
     }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![
+            ("weight".to_string(), self.weight.clone()),
+            ("bias".to_string(), self.bias.clone()),
+        ]
+    }
 }
