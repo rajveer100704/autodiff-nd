@@ -61,12 +61,12 @@ This project spans the entire ML systems stack:
 ### ⚡ Performance scaling
 Measured on a multi-core CPU, showing the impact of kernel-level fusion in FlashAttention. Benchmarks averaged over 10 runs (± stddev) after warmup to ensure cache-stable measurements.
 
-![Time Benchmark](benchmark_time.png)
+![Time Benchmark](assets/benchmarks/benchmark_time.png)
 
 ### 💾 Memory Scaling
 FlashAttention reduces memory complexity from $O(N^2)$ to $O(N)$.
 
-![Memory Benchmark](benchmark_memory.png)
+![Memory Benchmark](assets/benchmarks/benchmark_memory.png)
 
 > [!NOTE]
 > Memory usage is estimated based on tensor dimensions and 64-bit float size.

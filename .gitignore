@@ -9,7 +9,6 @@ __pycache__/
 
 # Project-specific
 bench_results.csv
-benchmark_*.png
 
 # Docs / internal
 walkthrough.md
